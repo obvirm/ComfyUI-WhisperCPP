@@ -1,6 +1,6 @@
 [project]
 name = "obvirm-whisperxx"
-version = "2.1.71"
+version = "2.1.72"
 description = "WhisperCPP for ComfyUI - whisper.cpp with full CPP params, alignment, diarization"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

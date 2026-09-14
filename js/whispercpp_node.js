@@ -42,10 +42,19 @@ app.registerExtension({
 
                     // Captures the user's manually-set node width so toggles never reset it.
                     // Initialized from .size[0] on first toggle; updated on every resize.
-                    let savedWidth = this.size[0] || 400;
+                    // Number.isFinite guards: a non-finite width (NaN/undefined) would
+                    // serialize to null in the workflow JSON (issue #15: "size": [null, N])
+                    // and leave the node unselectable after reload.
+                    let savedWidth = (this.size && Number.isFinite(this.size[0]) && this.size[0] > 0)
+                        ? this.size[0]
+                        : 400;
 
                     const update = (show) => {
-                        if (savedWidth === 0) savedWidth = this.size[0] || 400;
+                        if (!Number.isFinite(savedWidth) || savedWidth <= 0) {
+                            savedWidth = (this.size && Number.isFinite(this.size[0]) && this.size[0] > 0)
+                                ? this.size[0]
+                                : 400;
+                        }
 
                         if (!show) {
                             this.widgets = this.widgets.filter(w => !refs.includes(w));
@@ -58,17 +67,27 @@ app.registerExtension({
                         }
 
                         // Only height changes – width stays at what the user chose.
+                        // Validate both: computeSize() can return non-finite values during
+                        // workflow restoration, and assigning them corrupts size on disk.
                         const newSize = this.computeSize();
-                        this.size = [savedWidth, newSize[1]];
+                        const safeWidth = (Number.isFinite(savedWidth) && savedWidth > 0)
+                            ? savedWidth
+                            : 400;
+                        const safeHeight = (newSize && Number.isFinite(newSize[1]))
+                            ? newSize[1]
+                            : 200;
+                        this.size = [safeWidth, safeHeight];
                         this.setDirtyCanvas(true, true);
                     };
 
                     toggle.callback = (v) => update(v);
 
                     // Track manual resizes so the user's width is always honoured.
+                    // Only accept sane values – a non-finite/zero width here is how
+                    // [null, N] got written to workflow JSON in the first place.
                     const origResize = this.onResize;
                     this.onResize = function (w, h) {
-                        if (w != null) savedWidth = w;
+                        if (Number.isFinite(w) && w > 0) savedWidth = w;
                         if (origResize) return origResize.apply(this, arguments);
                     };
 
