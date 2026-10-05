@@ -23,10 +23,71 @@ const EXT_WIDGETS = [
     "diarize",
 ];
 
+// ── Issue #16: language dropdown pollution ─────────────────────────────────
+// Other extensions (e.g. MiniMax Music Production Toolkit) inject their own
+// labels - `日本語 (Japanese)`, `Multilingual / mixed` - into combo widgets that
+// share the widget name `language`. ComfyUI then rejects the prompt with
+// "Value not in list" because the backend never offered those values.
+// Canonical values: "None"/"auto", 2-3 letter codes, Title Case names.
+// tests/test_languages.py compiles this exact pattern against every value the
+// backend offers - if you change it, change it there too.
+const LANG_VALUE_RE = /^(None|auto|[a-z]{2,3}|[A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)*)$/;
+const LANG_PAREN_RE = /[（(]([^()]+)[)）]/;
+
+// Map a foreign/legacy selector onto a value the backend accepts.
+function toCanonicalLang(value, options) {
+    if (typeof value !== "string") return "None";
+    if (LANG_VALUE_RE.test(value)) return value;
+
+    const candidates = [];
+    const paren = value.match(LANG_PAREN_RE);
+    if (paren) {
+        candidates.push(paren[1]);
+        candidates.push(value.replace(LANG_PAREN_RE, ""));
+    }
+    candidates.push(value);
+    for (const cand of candidates) {
+        const t = (cand || "").trim();
+        if (!t) continue;
+        const low = t.toLowerCase();
+        // Only ever adopt a value the backend accepts, even if this list has
+        // not been filtered yet.
+        const hit = options.find(o => typeof o === "string" && LANG_VALUE_RE.test(o) && o.toLowerCase() === low);
+        if (hit) return hit;
+    }
+    // Unknown label ("Multilingual / mixed", garbage from another extension,
+    // ...): fall back to auto-detect instead of submitting an invalid value.
+    return "None";
+}
+
+// Drop foreign options and fix the current value of the language widget.
+function sanitizeLangWidget(node) {
+    const w = node?.widgets?.find(x => x.name === "language");
+    if (!w) return;
+    const opts = w.options?.values;
+    if (Array.isArray(opts) && opts.some(o => typeof o !== "string" || !LANG_VALUE_RE.test(o))) {
+        // Mutate in place: values is shared with the node definition, so this
+        // also heals the list for nodes created later.
+        for (let i = opts.length - 1; i >= 0; i--) {
+            if (typeof opts[i] !== "string" || !LANG_VALUE_RE.test(opts[i])) opts.splice(i, 1);
+        }
+    }
+    const list = Array.isArray(w.options?.values) ? w.options.values : [];
+    const mapped = toCanonicalLang(w.value, list);
+    if (mapped !== w.value) w.value = mapped;
+}
+
 app.registerExtension({
     name: "WhisperCPP.AdvancedSettings",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name === "WhisperCPPNode") {
+            // Widget values are restored by onConfigure, so sanitize there too.
+            const onConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function () {
+                onConfigure?.apply(this, arguments);
+                sanitizeLangWidget(this);
+            };
+
             const onCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 onCreated?.apply(this, arguments);
@@ -97,6 +158,26 @@ app.registerExtension({
                 setup(cppToggle, cppRefs);
                 setup(extToggle, extRefs);
 
+                // ── Language widget (issue #16) ──
+                const langNode = this;
+                sanitizeLangWidget(this);
+                const langW = this.widgets.find(w => w.name === "language");
+                if (langW && !langW.__whisperLangHooked) {
+                    langW.__whisperLangHooked = true;
+                    const origCb = langW.callback;
+                    // Re-sanitize at interaction time: another extension may
+                    // have polluted the options after this node was created.
+                    langW.callback = function (value, ...rest) {
+                        sanitizeLangWidget(langNode);
+                        const list = Array.isArray(langW.options?.values) ? langW.options.values : [];
+                        const canon = toCanonicalLang(value, list);
+                        langW.value = canon;
+                        const ret = origCb ? origCb.call(this, canon, ...rest) : undefined;
+                        langW.value = canon; // LiteGraph may assign after the callback
+                        return ret;
+                    };
+                }
+
                 // ── Mutual exclusion: DTW ↔ Alignment ──
                 const dtwW = this.widgets.find(w => w.name === "dtw_token_timestamps");
                 const alignW = this.widgets.find(w => w.name === "align");
@@ -119,6 +200,18 @@ app.registerExtension({
                     };
                 }
             };
+        }
+    },
+
+    // Widget values from a saved workflow are fully restored once the graph is
+    // loaded - run one last pass so a workflow saved while the dropdown was
+    // polluted cannot re-submit a foreign value.
+    async loadedGraph(graph) {
+        const nodes = graph?._nodes ?? [];
+        for (const n of nodes) {
+            if (n?.type === "WhisperCPPNode" || n?.comfyClass === "WhisperCPPNode") {
+                sanitizeLangWidget(n);
+            }
         }
     },
 });

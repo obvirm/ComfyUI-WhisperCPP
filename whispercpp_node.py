@@ -27,32 +27,15 @@ except ImportError:
     def get_model_keys(): return GGML_FALLBACK_KEYS
     def load_custom_models(*args, **kwargs): pass
 
-# Full language codes for whisper (100 languages) — whisper.cpp native only
-WHISPER_LANGUAGES = {
-    "en":"english", "zh":"chinese", "de":"german", "es":"spanish", "ru":"russian", "ko":"korean", "fr":"french",
-    "ja":"japanese", "pt":"portuguese", "tr":"turkish", "pl":"polish", "ca":"catalan", "nl":"dutch",
-    "ar":"arabic", "sv":"swedish", "it":"italian", "id":"indonesian", "hi":"hindi", "fi":"finnish",
-    "vi":"vietnamese", "he":"hebrew", "uk":"ukrainian", "el":"greek", "ms":"malay", "cs":"czech",
-    "ro":"romanian", "da":"danish", "hu":"hungarian", "ta":"tamil", "no":"norwegian", "th":"thai",
-    "ur":"urdu", "hr":"croatian", "bg":"bulgarian", "lt":"lithuanian", "la":"latin",
-    "mi":"maori", "ml":"malayalam", "cy":"welsh", "sk":"slovak", "te":"telugu", "fa":"persian",
-    "lv":"latvian", "bn":"bengali", "sr":"serbian", "az":"azerbaijani", "sl":"slovenian",
-    "kn":"kannada", "et":"estonian", "mk":"macedonian", "br":"breton", "eu":"basque",
-    "is":"icelandic", "hy":"armenian", "ne":"nepali", "bs":"bosnian",
-    "kk":"kazakh", "sq":"albanian", "sw":"swahili", "gl":"galician", "mr":"marathi",
-    "pa":"punjabi", "si":"sinhala", "km":"khmer", "sn":"shona", "yo":"yoruba",
-    "so":"somali", "af":"afrikaans", "oc":"occitan", "ka":"georgian", "be":"belarusian",
-    "tg":"tajik", "sd":"sindhi", "gu":"gujarati", "am":"amharic", "yi":"yiddish",
-    "lo":"lao", "uz":"uzbek", "fo":"faroese", "ht":"haitian creole", "ps":"pashto",
-    "tk":"turkmen", "nn":"nynorsk", "mt":"maltese", "sa":"sanskrit", "lb":"luxembourgish",
-    "my":"myanmar", "bo":"tibetan", "tl":"tagalog", "mg":"malagasy", "as":"assamese",
-    "tt":"tatar", "haw":"hawaiian", "ln":"lingala", "ha":"hausa", "ba":"bashkir",
-    "jw":"javanese", "su":"sundanese", "yue":"cantonese", "nb":"bokmal", "mn":"mongolian",
-}
-
-# whisper.cpp native languages — always available
-LANGUAGES = WHISPER_LANGUAGES
-TO_LANGUAGE_CODE = {v:k for k,v in WHISPER_LANGUAGES.items()}
+# Language codes / names / selector normalization live in whispercpp.languages
+# (issue #16) so they can be unit-tested without the ComfyUI runtime.
+from .whispercpp.languages import (
+    WHISPER_LANGUAGES,
+    LANGUAGES,
+    TO_LANGUAGE_CODE,
+    language_options,
+    resolve_language,
+)
 
 
 def shift_segment_timestamps(segment: dict, offset: float) -> dict:
@@ -123,10 +106,7 @@ class WhisperCPPNode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        lang_list = ["None"]
-        if LANGUAGES: lang_list.extend(sorted(LANGUAGES.keys()))
-        if TO_LANGUAGE_CODE: lang_list.extend(sorted(k.title() for k in TO_LANGUAGE_CODE.keys()))
-        lang_list = list(dict.fromkeys(lang_list))
+        lang_list = language_options()
 
         required = {
             "audio": ("AUDIO",),
@@ -204,6 +184,27 @@ class WhisperCPPNode:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs): return float("NaN")
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, language):
+        """Accept every language selector ComfyUI might hand us (issue #16).
+
+        Declaring ``language`` here makes ComfyUI skip its default
+        ``value not in list`` check for this input ONLY (see execution.py,
+        ``if x not in validate_function_inputs``); every other input keeps the
+        usual validation.
+
+        Needed because other extensions inject labels such as
+        ``日本語 (Japanese)`` / ``Multilingual / mixed`` into the dropdown, and
+        those values are stored in saved workflows. They are normalized to
+        whisper.cpp codes (or auto-detect) by ``resolve_language`` at run time
+        instead of killing the prompt before transcription starts.
+        """
+        if language is None:
+            return True
+        if not isinstance(language, str):
+            return f"language must be a string, got {type(language).__name__}"
+        return True
 
     def _get(self, kw, key, default=None):
         v = kw.get(key); return v if v is not None else default
@@ -303,8 +304,15 @@ class WhisperCPPNode:
                 logger.error(f"UVR failed: {e}")
         pbar.update(1)
 
-        lang = self._get(kwargs,"language","en")
-        if lang == "None": lang = None
+        # Issue #16: the value may be a code, an English name, a foreign label
+        # ("日本語 (Japanese)") or an auto synonym ("None", "auto",
+        # "Multilingual / mixed"). Normalize instead of passing junk to
+        # whisper.cpp (which errors out on unknown languages).
+        lang_raw = self._get(kwargs, "language", "en")
+        lang, lang_known = resolve_language(lang_raw)
+        if not lang_known:
+            logger.warning(f"Unknown language selector {lang_raw!r} -> auto-detect")
+        logger.info(f"Language: {lang or 'auto-detect'} (raw={lang_raw!r})")
         strat_str = self._get(kwargs,"sampling_strategy","greedy")
         strategy = 0 if strat_str == "greedy" else 1
 

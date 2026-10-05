@@ -123,7 +123,7 @@ On first use, each module automatically downloads its DLLs from GitHub Releases:
 1. Add **WhisperCPPNode**
 2. Connect audio source to `audio` socket
 3. Select model (auto-downloads on first use)
-4. Set `language` (or None for auto-detect)
+4. Set `language` — code (`ja`), English name (`Japanese`), `auto`, or `None` for auto-detect. Foreign labels (e.g. `日本語 (Japanese)` from other extensions) are normalized automatically (issue #16)
 5. Enable `hallu_filter` (default ON) for RMS-based pre-filter
 6. Set `vad=true` for active speech detection
 7. Set `separate_vocals=true` for vocal separation
