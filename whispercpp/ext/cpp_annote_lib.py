@@ -102,16 +102,26 @@ def _load():
         return None
     if IS_WINDOWS:
         deps_dir = Path(dll_path).parent.resolve()
-        # Pre-load onnxruntime.dll 1.27.0 BEFORE cpp_annote.dll
-        ort_dll = deps_dir / "onnxruntime.dll"
-        ort_shared = deps_dir / "onnxruntime_providers_shared.dll"
-        if ort_dll.exists():
+        # Pre-load the NEWEST onnxruntime.dll BEFORE cpp_annote.dll.
+        # The process can only use one onnxruntime.dll (issue #17): a stale
+        # 1.27.0 copy here used to poison every later sherpa-onnx alignment
+        # run and crash ComfyUI. cpp_annote is built against ORT 1.27 and
+        # runs fine on any newer runtime (the C API is backward compatible),
+        # so prefer the sherpa-bundled copy when it is newer.
+        from ..ort_util import dll_file_version, pick_newest_ort, sherpa_bundle_dll
+        ort_dll = pick_newest_ort([deps_dir / "onnxruntime.dll", sherpa_bundle_dll()])
+        if ort_dll is not None:
             try:
                 ctypes.CDLL(str(ort_dll))
-                logger.info(f"Pre-loaded onnxruntime: {ort_dll}")
+                logger.info(f"Pre-loaded onnxruntime: {ort_dll} (v{dll_file_version(ort_dll)})")
+                os.add_dll_directory(str(ort_dll.parent.resolve()))
             except Exception as e:
                 logger.warning(f"Failed to pre-load onnxruntime: {e}")
-        if ort_shared.exists():
+        # providers_shared belongs to the same build as the deps_dir ORT copy;
+        # only preload it when that copy won (older core + newer providers mix
+        # is undefined).
+        ort_shared = deps_dir / "onnxruntime_providers_shared.dll"
+        if ort_shared.exists() and ort_dll == deps_dir / "onnxruntime.dll":
             try:
                 ctypes.CDLL(str(ort_shared))
                 logger.info(f"Pre-loaded onnxruntime_providers_shared: {ort_shared}")

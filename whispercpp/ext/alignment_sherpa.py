@@ -3,7 +3,7 @@ sherpa-onnx CTC forced alignment.
 Alternative to wav2vec2 alignment — uses zipformer-en-ctc.
 """
 
-import logging, os, re, numpy as np
+import logging, os, sys, numpy as np
 from pathlib import Path
 
 logger = logging.getLogger("WhisperCPP.AlignSherpa")
@@ -73,6 +73,92 @@ def cleanup():
     logger.info("Alignment sherpa cache cleaned up")
 
 
+# ── ONNX Runtime pairing guard (issue #17) ─────────────────────────────────
+# sherpa-onnx's native module is compiled against a specific ONNX Runtime API.
+# The process resolves `onnxruntime.dll` by NAME to whatever copy is already
+# loaded (or to `sherpa_onnx/lib/` when none is); if that DLL is older than
+# the API the module expects, the native GetApi() call returns NULL and the
+# next use is a Windows access violation - uncatchable in Python, so ComfyUI
+# itself dies and reconnects. Check the pairing in Python BEFORE entering
+# native code and raise a normal exception instead; the node catches it and
+# skips alignment.
+from ..ort_util import dll_file_version, loaded_ort_modules, parse_so_version
+
+
+class AlignmentUnavailableError(RuntimeError):
+    """Alignment cannot run safely - raised instead of letting the process crash."""
+
+
+# FileVersion of sherpa_onnx/lib/onnxruntime.dll shipped by each release
+# (measured from the published win_amd64 wheels). Keep in sync when adding
+# releases: a bundle older than this table means pyd/DLL skew -> native crash.
+_KNOWN_BUNDLED_ORT = {
+    "1.13.3": (1, 24, 4, 0),
+    "1.13.4": (1, 27, 0, 0),
+    "1.13.5": (1, 27, 1, 0),
+    "1.13.6": (1, 27, 1, 0),
+    "1.13.7": (1, 27, 1, 0),
+    "1.13.8": (1, 28, 2, 0),
+}
+
+
+def bundled_ort_version():
+    """Version of the onnxruntime bundled inside sherpa_onnx/lib, or None."""
+    lib = Path(sherpa_onnx.__file__).resolve().parent / "lib"
+    if sys.platform == "win32":
+        dll = lib / "onnxruntime.dll"
+        return dll_file_version(dll) if dll.exists() else None
+    if lib.is_dir():
+        for f in sorted(lib.iterdir()):
+            v = parse_so_version(f.name)
+            if v:
+                return v
+    return None
+
+
+def preflight_ort():
+    """Verify the sherpa/ONNX Runtime pairing before any native call (issue #17).
+
+    Returns the bundled ORT version, or raises AlignmentUnavailableError with
+    an actionable message. Without this check a skewed pairing kills the whole
+    ComfyUI process with an uncatchable access violation.
+    """
+    version = getattr(sherpa_onnx, "__version__", "")
+    expected = _KNOWN_BUNDLED_ORT.get(version)
+
+    # The process may already contain an older onnxruntime.dll (e.g. a stale
+    # build artifact pre-loaded at node import); by name-unification the
+    # native module would bind to THAT copy and crash (issue #17).
+    for path, ver in loaded_ort_modules():
+        if expected and ver and ver[:2] < expected[:2]:
+            raise AlignmentUnavailableError(
+                f"an older onnxruntime.dll is already loaded in this process: "
+                f"{path} ({ver[0]}.{ver[1]}.{ver[2]}) but sherpa-onnx {version} needs "
+                f"{expected[0]}.{expected[1]}.x - continuing would crash the process "
+                "(issue #17). Fix: update that DLL to >= the required version"
+            )
+
+    bundled = bundled_ort_version()
+    if bundled is None:
+        lib = Path(sherpa_onnx.__file__).resolve().parent / "lib"
+        raise AlignmentUnavailableError(
+            f"sherpa-onnx is missing its bundled onnxruntime.dll (expected in {lib}). "
+            "Without it the native code loads an arbitrary older ONNX Runtime and "
+            "crashes the process (issue #17). Fix: pip install --force-reinstall sherpa-onnx-core"
+        )
+    if expected and bundled[:2] < expected[:2]:
+        raise AlignmentUnavailableError(
+            f"sherpa-onnx {version} has a mismatched ONNX Runtime bundle: "
+            f"onnxruntime.dll is {bundled[0]}.{bundled[1]}.{bundled[2]} but its native "
+            f"module needs {expected[0]}.{expected[1]}.x - loading the model would crash "
+            "the process (issue #17). Fix: "
+            f"pip install --force-reinstall sherpa-onnx=={version} sherpa-onnx-core=={version}"
+        )
+    logger.info(f"  ORT pairing OK: sherpa-onnx {version} + onnxruntime "
+                f"{bundled[0]}.{bundled[1]}.{bundled[2]}")
+    return bundled
+
+
 def load_align_model(device="cpu"):
     """Load sherpa-onnx CTC recognizer. Cached with 10min TTL."""
     global cache
@@ -88,6 +174,10 @@ def load_align_model(device="cpu"):
         cache[device] = (recognizer, time.time())  # refresh TTL
         logger.debug(f"Alignment recognizer cached for {device}")
         return recognizer
+
+    # Never enter the native ORT code with a mismatched runtime (issue #17):
+    # a NULL OrtApi pointer there is an uncatchable access violation.
+    preflight_ort()
 
     model_path, tokens_path = ensure_model()
     logger.info(f"Loading sherpa CTC model: {model_path}")
