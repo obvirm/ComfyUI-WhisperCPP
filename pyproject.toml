@@ -4,7 +4,7 @@ version = "2.1.74"
 description = "WhisperCPP for ComfyUI - whisper.cpp with full CPP params, alignment, diarization"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
-dependencies = ["numpy","tqdm","requests","huggingface-hub","scipy","sherpa-onnx==1.13.8"]
+dependencies = ["numpy","tqdm","requests","huggingface-hub","scipy","sherpa-onnx==2.0.1"]
 
 [project.urls]
 Repository = "https://github.com/obvirm/ComfyUI-WhisperCPP"
