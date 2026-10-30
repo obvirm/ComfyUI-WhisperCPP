@@ -3,5 +3,5 @@ tqdm
 requests
 huggingface-hub
 scipy
-sherpa-onnx==1.13.8
+sherpa-onnx==2.0.1
 certifi
